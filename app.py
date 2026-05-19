@@ -4,14 +4,14 @@ import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
-import itertools # 조합 계산을 위한 라이브러리
+import itertools
 
 # --- 1. 웹페이지 기본 설정 ---
 st.set_page_config(page_title="AI 트레이딩 대시보드", page_icon="📈", layout="wide")
 st.markdown("<style>.block-container { padding-top: 2rem; padding-bottom: 2rem; }</style>", unsafe_allow_html=True)
 
 st.title("📈 AI 기반 퀀트 트레이딩 대시보드")
-st.markdown("다중 패턴 인식 및 AI 파라미터 최적화 시스템")
+st.markdown("다중 패턴 인식 및 분할 매수(물타기) 시뮬레이션 시스템")
 st.markdown("---")
 
 # --- 2. 사이드바 (컨트롤 패널) ---
@@ -25,12 +25,21 @@ with st.sidebar:
         interval = st.selectbox("봉 단위", ["5m", "15m", "1h", "1d"], index=1) 
     
     st.markdown("---")
-    st.markdown("**🛠️ 수동 테스트 설정**")
+    st.markdown("**🤖 패턴 민감도 설정**")
     distance = st.slider("최소 캔들 간격", 3, 20, 5)
     tolerance = st.slider("수평/대칭 허용 오차(%)", 0.0, 2.0, 0.5, 0.1)
-    init_cash = st.number_input("초기 자본금 ($)", value=10000)
-    target_profit = st.slider("익절 목표 (%)", 0.5, 5.0, 1.5, 0.1)
-    stop_loss = st.slider("손절 제한 (%)", 0.5, 5.0, 1.0, 0.1)
+    
+    st.markdown("---")
+    st.markdown("**💰 기본 매매 규칙**")
+    init_cash = st.number_input("총 가상 자본금 ($)", value=10000)
+    bet_size = st.number_input("1회 매수 투입 금액 ($)", value=1000)
+    target_profit = st.slider("최종 익절 목표 (%)", 0.5, 10.0, 2.0, 0.5)
+    stop_loss = st.slider("최종 손절 제한 (%)", 0.5, 10.0, 5.0, 0.5)
+    
+    st.markdown("---")
+    st.markdown("**📉 분할 매수 (물타기) 설정**")
+    max_adds = st.slider("최대 추가 매수 횟수", 0, 5, 2)
+    add_drop_pct = st.slider("추가 매수 발동 하락률 (%)", 1.0, 10.0, 3.0, 0.5)
 
 # --- 3. 데이터 수집 함수 ---
 @st.cache_data
@@ -73,53 +82,99 @@ def detect_patterns_at_idx(idx, highs, lows, peaks, troughs, tol_percent):
         
     return None
 
-# --- 5. 백테스팅 매매 엔진 ---
-def run_backtest(df, peaks, troughs, tol_percent, tp, sl, time_col):
+# --- 5. 🌟 평균단가 계산 및 백테스팅 엔진 (업그레이드) ---
+def run_backtest(df, peaks, troughs, tol_percent, tp, sl, time_col, bet, m_adds, drop_pct):
     highs, lows, closes = df['High'].values.flatten(), df['Low'].values.flatten(), df['Close'].values.flatten()
     trades = []
-    in_position, entry_price, entry_idx, pattern_name = False, 0, 0, ""
+    
+    in_position = False
+    entry_idx = 0
+    pattern_name = ""
+    
+    # 계좌 및 평균단가 관리 변수
+    total_shares = 0.0
+    total_cost = 0.0
+    avg_price = 0.0
+    add_count = 0
     
     for i in range(20, len(df)):
+        current_close = closes[i]
+        
         if not in_position:
             pattern = detect_patterns_at_idx(i, highs, lows, peaks, troughs, tol_percent)
             if pattern:
-                in_position, entry_price, entry_idx, pattern_name = True, closes[i], i, pattern
+                # 첫 진입 (1차 매수)
+                in_position = True
+                entry_idx = i
+                pattern_name = pattern
+                
+                total_shares = bet / current_close
+                total_cost = bet
+                avg_price = total_cost / total_shares
+                add_count = 0
         else:
-            current_close = closes[i]
-            ret = (current_close - entry_price) / entry_price * 100
+            # 포지션 유지 중: 현재 평균단가 대비 수익률 계산
+            ret_from_avg = (current_close - avg_price) / avg_price * 100
             
-            if ret >= tp:
-                trades.append({'진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '익절'})
+            # [A] 추가 매수 (물타기) 로직
+            if ret_from_avg <= -drop_pct and add_count < m_adds:
+                new_shares = bet / current_close
+                total_shares += new_shares
+                total_cost += bet
+                
+                # 새로운 평균단가 재계산 수식: (기존 투입액 + 신규 투입액) / (기존 수량 + 신규 수량)
+                avg_price = total_cost / total_shares
+                add_count += 1
+                
+                # 추가 매수 후 새롭게 바뀐 수익률로 다시 갱신
+                ret_from_avg = (current_close - avg_price) / avg_price * 100
+            
+            # [B] 청산 로직 (바뀐 평균단가 기준)
+            if ret_from_avg >= tp:
+                trades.append({
+                    '진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], '패턴': pattern_name,
+                    '투입금액': total_cost, '최종 평단가': avg_price, '청산가': current_close,
+                    '수익률(%)': ret_from_avg, '물타기 횟수': add_count, '결과': '익절'
+                })
                 in_position = False
-            elif ret <= -sl:
-                trades.append({'진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '손절'})
+            elif ret_from_avg <= -sl:
+                trades.append({
+                    '진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], '패턴': pattern_name,
+                    '투입금액': total_cost, '최종 평단가': avg_price, '청산가': current_close,
+                    '수익률(%)': ret_from_avg, '물타기 횟수': add_count, '결과': '손절'
+                })
                 in_position = False
-            elif (i - entry_idx) >= 15:
-                trades.append({'진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '타임컷'})
+            elif (i - entry_idx) >= 30: # 단타 타임컷 기한 연장 (분할 매수를 고려)
+                trades.append({
+                    '진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], '패턴': pattern_name,
+                    '투입금액': total_cost, '최종 평단가': avg_price, '청산가': current_close,
+                    '수익률(%)': ret_from_avg, '물타기 횟수': add_count, '결과': '타임컷'
+                })
                 in_position = False
                 
     return pd.DataFrame(trades)
 
-# --- 6. 🌟 AI 최적화 알고리즘 엔진 ---
-def optimize_strategy(df, peaks, troughs, time_col):
-    # 테스트할 변수들의 범위 (Grid)
-    tp_range = [1.0, 1.5, 2.0, 3.0] # 익절 %
-    sl_range = [0.5, 1.0, 1.5, 2.0] # 손절 %
-    tol_range = [0.2, 0.5, 0.8]     # 오차율 %
+# --- 6. AI 최적화 알고리즘 엔진 (물타기 변수 추가) ---
+def optimize_strategy(df, peaks, troughs, time_col, bet, m_adds, drop_pct):
+    tp_range = [1.5, 3.0, 5.0] 
+    sl_range = [2.0, 4.0, 6.0] 
+    tol_range = [0.2, 0.5, 0.8]     
     
     best_return = -999
     best_params = {}
     best_log = pd.DataFrame()
     
-    # 모든 경우의 수를 순회하며 시뮬레이션
     combinations = list(itertools.product(tp_range, sl_range, tol_range))
     
     for tp, sl, tol in combinations:
-        log = run_backtest(df, peaks, troughs, tol, tp, sl, time_col)
+        log = run_backtest(df, peaks, troughs, tol, tp, sl, time_col, bet, m_adds, drop_pct)
         if not log.empty:
-            total_ret = log['수익률(%)'].sum()
-            if total_ret > best_return:
-                best_return = total_ret
+            # 수익률(%)이 아니라 투입 금액 대비 실제 벌어들인 '수익금' 기반으로 최적화
+            log['수익금'] = log['투입금액'] * (log['수익률(%)'] / 100)
+            total_profit = log['수익금'].sum()
+            
+            if total_profit > best_return:
+                best_return = total_profit
                 best_params = {'익절': tp, '손절': sl, '오차율': tol}
                 best_log = log
                 
@@ -135,15 +190,15 @@ try:
         peaks, _ = find_peaks(highs, distance=distance)
         troughs, _ = find_peaks(-lows, distance=distance)
         
-        # 기본 수동 백테스팅
-        trade_log = run_backtest(df, peaks, troughs, tolerance, target_profit, stop_loss, time_col)
+        # 🌟 업그레이드된 백테스팅 실행
+        trade_log = run_backtest(df, peaks, troughs, tolerance, target_profit, stop_loss, time_col, bet_size, max_adds, add_drop_pct)
 
         m1, m2, m3 = st.columns(3)
         m1.metric("현재가", f"${df['Close'].iloc[-1].item():.2f}")
         m2.metric("분석된 캔들", f"{len(df)}개")
         m3.metric("수동 매매 횟수", f"{len(trade_log)}회")
         
-        tab1, tab2, tab3 = st.tabs(["📊 실시간 차트", "📝 수동 백테스팅 리포트", "🤖 AI 자동 최적화 (Tuning)"])
+        tab1, tab2, tab3 = st.tabs(["📊 실시간 차트", "📝 물타기 백테스팅 리포트", "🤖 AI 자동 최적화"])
         
         with tab1:
             fig = go.Figure(data=[go.Candlestick(x=df[time_col], open=df['Open'].values.flatten(), high=highs, low=lows, close=df['Close'].values.flatten(), increasing_line_color='#26a69a', decreasing_line_color='#ef5350')])
@@ -155,33 +210,38 @@ try:
             
         with tab2:
             if not trade_log.empty:
-                st.metric("📈 총 누적 수익률", f"{trade_log['수익률(%)'].sum():.2f}%")
-                st.dataframe(trade_log.style.format({'수익률(%)': '{:.2f}%'}), use_container_width=True)
-            else: st.info("수동 조건에 맞는 매매 내역이 없습니다.")
+                # 수익금 계산 컬럼 추가
+                trade_log['추정 수익금'] = trade_log['투입금액'] * (trade_log['수익률(%)'] / 100)
+                total_profit_sum = trade_log['추정 수익금'].sum()
                 
-        # 🌟 새로운 알고리즘 탭
+                st.metric("💵 총 누적 추정 수익금", f"${total_profit_sum:,.2f}")
+                st.dataframe(trade_log.style.format({
+                    '수익률(%)': '{:.2f}%', '최종 평단가': '${:.2f}', '청산가': '${:.2f}',
+                    '투입금액': '${:,.2f}', '추정 수익금': '${:,.2f}'
+                }), use_container_width=True)
+            else: st.info("조건에 맞는 매매 내역이 없습니다.")
+                
         with tab3:
             st.subheader("🚀 알고리즘 기반 황금 세팅 찾기")
-            st.write("프로그램이 백그라운드에서 수십 가지의 익절/손절/오차율 조합을 돌려보고, 가장 높은 누적 수익률을 내는 최적의 값을 찾아냅니다.")
-            
-            if st.button("🔥 자동 최적화 시작", use_container_width=True):
-                with st.spinner("알고리즘이 수십 번의 시뮬레이션을 돌리며 최적값을 계산 중입니다... (약 5~10초 소요)"):
-                    best_params, best_ret, best_log = optimize_strategy(df, peaks, troughs, time_col)
+            if st.button("🔥 물타기 전략 포함 자동 최적화 시작", use_container_width=True):
+                with st.spinner("알고리즘이 수십 번의 시뮬레이션을 돌리며 최적값을 계산 중입니다..."):
+                    best_params, best_ret, best_log = optimize_strategy(df, peaks, troughs, time_col, bet_size, max_adds, add_drop_pct)
                 
                 if best_params:
-                    st.success("🎉 최적화 완료! 이 종목의 최고 효율 세팅값을 찾았습니다.")
-                    
+                    st.success("🎉 최적화 완료!")
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("🏆 최대 누적 수익률", f"{best_ret:.2f}%")
+                    c1.metric("🏆 최대 누적 수익금", f"${best_ret:,.2f}")
                     c2.metric("최적 익절 라인", f"{best_params['익절']}%")
                     c3.metric("최적 손절 라인", f"{best_params['손절']}%")
                     c4.metric("최적 오차율", f"{best_params['오차율']}%")
                     
-                    st.markdown("---")
-                    st.write("해당 세팅으로 진행된 시뮬레이션 매매 일지")
-                    st.dataframe(best_log.style.format({'수익률(%)': '{:.2f}%'}), use_container_width=True)
+                    best_log['추정 수익금'] = best_log['투입금액'] * (best_log['수익률(%)'] / 100)
+                    st.dataframe(best_log.style.format({
+                        '수익률(%)': '{:.2f}%', '최종 평단가': '${:.2f}', '청산가': '${:.2f}',
+                        '투입금액': '${:,.2f}', '추정 수익금': '${:,.2f}'
+                    }), use_container_width=True)
                 else:
-                    st.warning("어떤 조합으로도 수익이 나는 타점을 찾지 못했습니다.")
+                    st.warning("수익이 나는 타점을 찾지 못했습니다.")
 
 except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}")
