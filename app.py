@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import numpy as np
+import pandas as pd
 from scipy.signal import find_peaks
 
 # --- 1. 웹페이지 기본 설정 ---
@@ -9,23 +10,29 @@ st.set_page_config(page_title="AI 트레이딩 대시보드", page_icon="📈", 
 st.markdown("<style>.block-container { padding-top: 2rem; padding-bottom: 2rem; }</style>", unsafe_allow_html=True)
 
 st.title("📈 AI 기반 퀀트 트레이딩 대시보드")
-st.markdown("다중 패턴 인식 및 단기 추세 모니터링 시스템")
+st.markdown("다중 패턴 인식 및 백테스팅 데이터 수집 시스템")
 st.markdown("---")
 
 # --- 2. 사이드바 (컨트롤 패널) ---
 with st.sidebar:
-    st.header("⚙️ 검색 설정")
+    st.header("⚙️ 검색 및 매매 설정")
     ticker = st.text_input("종목 코드 (예: AAPL, QQQ, TSLA)", value="QQQ") 
     col1, col2 = st.columns(2)
     with col1:
         period = st.selectbox("조회 기간", ["1mo", "3mo", "6mo", "1y"], index=1)
     with col2:
-        interval = st.selectbox("봉 단위", ["5m", "15m", "1h", "1d"], index=3)
+        interval = st.selectbox("봉 단위", ["5m", "15m", "1h", "1d"], index=1) # 단타용 15분봉 기본 설정
     
     st.markdown("---")
     st.markdown("**🤖 알고리즘 민감도 설정**")
     distance = st.slider("최소 캔들 간격", min_value=3, max_value=20, value=5)
     tolerance = st.slider("수평/대칭 허용 오차(%)", min_value=0.0, max_value=2.0, value=0.5, step=0.1)
+
+    st.markdown("---")
+    st.markdown("**💰 단타 모의매매 규칙**")
+    init_cash = st.number_input("초기 자본금 ($)", value=10000)
+    target_profit = st.slider("익절 목표 (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
+    stop_loss = st.slider("손절 제한 (%)", min_value=0.5, max_value=5.0, value=1.0, step=0.1)
 
 # --- 3. 데이터 수집 함수 ---
 @st.cache_data
@@ -34,58 +41,91 @@ def get_data(ticker, period, interval):
     df.reset_index(inplace=True)
     return df
 
-# --- 4. 🌟 다중 패턴 인식 엔진 ---
-def detect_patterns(peaks, troughs, highs, lows, tol_percent):
-    detected_patterns = []
-    res_line = None
-    sup_line = None
+# --- 4. 다중 패턴 인식 함수 (순차 탐색용으로 인덱스 범위 지정 가능하게 수정) ---
+def detect_patterns_at_idx(idx, highs, lows, peaks, troughs, tol_percent):
+    # 현재 인덱스(idx) 이전까지의 극점만 활용 (미래 데이터 참조 방지)
+    avail_peaks = [p for p in peaks if p <= idx]
+    avail_troughs = [t for t in troughs if t <= idx]
     
-    # [A] 쌍바닥 (Double Bottom) 탐지 로직 (최근 2개 저점 비교)
-    if len(troughs) >= 2:
-        t1_price, t2_price = lows[troughs[-2]], lows[troughs[-1]]
-        price_diff_percent = abs(t1_price - t2_price) / t1_price * 100
-        
-        # 두 저점의 가격 차이가 오차 범위(기본 오차의 2배 정도 허용) 내에 있다면
-        if price_diff_percent <= (tol_percent * 2):
-            detected_patterns.append("쌍바닥 (Double Bottom)")
+    # 쌍바닥 탐지 (최근 2개)
+    if len(avail_troughs) >= 2:
+        t1, t2 = avail_troughs[-2], avail_troughs[-1]
+        if idx - t2 <= 5: # 최근 저점이 형성된 지 얼마 안 된 시점
+            p_diff = abs(lows[t1] - lows[t2]) / lows[t1] * 100
+            if p_diff <= (tol_percent * 2):
+                return "쌍바닥"
 
-    # [B] 삼각 수렴 및 박스권 탐지 로직 (최근 3개 극점 활용)
-    if len(peaks) >= 3 and len(troughs) >= 3:
-        recent_peaks, recent_troughs = peaks[-3:], troughs[-3:]
-        peak_x, peak_y = recent_peaks, highs[recent_peaks]
-        trough_x, trough_y = recent_troughs, lows[recent_troughs]
+    # 삼각수렴 및 채널 탐지 (최근 3개)
+    if len(avail_peaks) >= 3 and len(avail_troughs) >= 3:
+        p_x, p_y = avail_peaks[-3:], highs[avail_peaks[-3:]]
+        t_x, t_y = avail_troughs[-3:], lows[avail_troughs[-3:]]
         
-        # 선형 회귀로 기울기(m)와 절편(c) 계산
-        peak_slope, peak_intercept = np.polyfit(peak_x, peak_y, 1)
-        trough_slope, trough_intercept = np.polyfit(trough_x, trough_y, 1)
+        p_slope, _ = np.polyfit(p_x, p_y, 1)
+        t_slope, _ = np.polyfit(t_x, t_y, 1)
         
-        # 기울기 정규화 (%)
-        avg_price = np.mean(highs)
-        norm_peak_slope = (peak_slope / avg_price) * 100
-        norm_trough_slope = (trough_slope / avg_price) * 100
+        avg_price = np.mean(highs[:idx+1])
+        norm_p_slope = (p_slope / avg_price) * 100
+        norm_t_slope = (t_slope / avg_price) * 100
         
-        # 상태 정의
-        is_flat_top = abs(norm_peak_slope) <= tol_percent
-        is_flat_bottom = abs(norm_trough_slope) <= tol_percent
-        is_rising_bottom = norm_trough_slope > tol_percent
-        is_falling_top = norm_peak_slope < -tol_percent
+        is_flat_top = abs(norm_p_slope) <= tol_percent
+        is_flat_bottom = abs(norm_t_slope) <= tol_percent
+        is_rising_bottom = norm_t_slope > tol_percent
+        is_falling_top = norm_p_slope < -tol_percent
         
-        res_line = (peak_slope, peak_intercept, recent_peaks)
-        sup_line = (trough_slope, trough_intercept, recent_troughs)
+        # 패턴 감지 순간 돌파 매수 타점 가정
+        if is_flat_top and is_rising_bottom: return "어센딩 트라이앵글"
+        elif is_falling_top and is_flat_bottom: return "디센딩 트라이앵글"
+        elif is_falling_top and is_rising_bottom: return "대칭 삼각수렴"
+        elif is_flat_top and is_flat_bottom: return "박스권 채널"
+        
+    return None
 
-        # 패턴 판별
-        if is_flat_top and is_rising_bottom:
-            detected_patterns.append("어센딩 트라이앵글")
-        elif is_falling_top and is_flat_bottom:
-            detected_patterns.append("디센딩 트라이앵글")
-        elif is_falling_top and is_rising_bottom:
-            detected_patterns.append("대칭 삼각수렴 (Symmetrical Triangle)")
-        elif is_flat_top and is_flat_bottom:
-            detected_patterns.append("박스권 / 횡보 채널")
+# --- 5. 백테스팅 매매 시뮬레이터 엔진 ---
+def run_backtest(df, peaks, troughs, tol_percent, tp, sl):
+    highs = df['High'].values.flatten()
+    lows = df['Low'].values.flatten()
+    closes = df['Close'].values.flatten()
+    
+    trades = []
+    in_position = False
+    entry_price = 0
+    entry_idx = 0
+    pattern_name = ""
+    
+    # 데이터를 처음부터 끝까지 흐르며 시뮬레이션 (단타 관점)
+    for i in range(20, len(df)):
+        if not in_position:
+            # 포지션이 없을 때 패턴 탐지 체크
+            pattern = detect_patterns_at_idx(i, highs, lows, peaks, troughs, tol_percent)
+            if pattern:
+                in_position = True
+                entry_price = closes[i]
+                entry_idx = i
+                pattern_name = pattern
+        else:
+            # 포지션이 있을 때 익절/손절 감시
+            current_close = closes[i]
+            ret = (current_close - entry_price) / entry_price * 100
+            
+            # 조건 A: 익절선 터치
+            if ret >= tp:
+                trades.append({'진입시간': df.iloc[entry_idx]['index'], '청산시간': df.iloc[i]['index'], 
+                               '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '익절'})
+                in_position = False
+            # 조건 B: 손절선 터치
+            elif ret <= -sl:
+                trades.append({'진입시간': df.iloc[entry_idx]['index'], '청산시간': df.iloc[i]['index'], 
+                               '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '손절'})
+                in_position = False
+            # 조건 C: 단타 타임컷 (너무 오래 끌면 본전 부근 청산 - 캔들 15개 제한)
+            elif (i - entry_idx) >= 15:
+                trades.append({'진입시간': df.iloc[entry_idx]['index'], '청산시간': df.iloc[i]['index'], 
+                               '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '타임컷'})
+                in_position = False
+                
+    return pd.DataFrame(trades)
 
-    return detected_patterns, res_line, sup_line
-
-# --- 5. 메인 화면 레이아웃 및 렌더링 ---
+# --- 6. 메인 화면 레이아웃 및 렌더링 ---
 try:
     df = get_data(ticker, period, interval)
     
@@ -97,51 +137,49 @@ try:
         peaks, _ = find_peaks(highs, distance=distance)
         troughs, _ = find_peaks(-lows, distance=distance)
         
-        # 🌟 다중 패턴 엔진 가동
-        found_patterns, res_line, sup_line = detect_patterns(peaks, troughs, highs, lows, tolerance)
+        # 백테스팅 가동
+        trade_log = run_backtest(df, peaks, troughs, tolerance, target_profit, stop_loss)
 
-        # UI 출력
+        # 상단 전광판
         current_price = df['Close'].iloc[-1].item()
         prev_price = df['Close'].iloc[-2].item()
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(label="현재가", value=f"${current_price:.2f}", delta=f"{(current_price - prev_price):.2f}")
         m2.metric(label="기간 내 최고가", value=f"${df['High'].max().item():.2f}")
-        m3.metric(label="거래량", value=f"{df['Volume'].iloc[-1].item():,}")
+        m3.metric(label="분석된 총 캔들 개수", value=f"{len(df)}개")
+        m4.metric(label="검출된 총 매매 횟수", value=f"{len(trade_log)}회")
         
-        tab1, tab2 = st.tabs(["📊 차트 & 극점 분석", "🤖 패턴 탐지 리포트"])
+        tab1, tab2 = st.tabs(["📊 실시간 차트 분석", "📝 모의투자 백테스팅 리포트"])
         
         with tab1:
             fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'].values.flatten(),
                             high=highs, low=lows, close=df['Close'].values.flatten(),
                             increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="Candle")])
             
-            fig.add_trace(go.Scatter(x=peaks, y=highs[peaks], mode='markers',
-                marker=dict(color='rgba(255, 0, 0, 0.7)', size=8, symbol='triangle-down'), name='저항점'))
-            fig.add_trace(go.Scatter(x=troughs, y=lows[troughs], mode='markers',
-                marker=dict(color='rgba(0, 150, 255, 0.7)', size=8, symbol='triangle-up'), name='지지점'))
-
-            # 차트 위에 추세선 그리기 (극점이 3개 이상일 때만)
-            if res_line and sup_line:
-                p_slope, p_int, p_x = res_line
-                t_slope, t_int, t_x = sup_line
-                line_x = np.array([min(p_x[0], t_x[0]), df.index[-1]])
-                
-                fig.add_trace(go.Scatter(x=line_x, y=p_slope * line_x + p_int, 
-                                         mode='lines', line=dict(color='yellow', width=2, dash='dash'), name='단기 저항선'))
-                fig.add_trace(go.Scatter(x=line_x, y=t_slope * line_x + t_int, 
-                                         mode='lines', line=dict(color='fuchsia', width=2, dash='dash'), name='단기 지지선'))
-
-            fig.update_layout(yaxis_title="가격", xaxis_rangeslider_visible=False, height=600,
-                              margin=dict(l=0, r=0, t=30, b=0), hovermode="x unified")
+            fig.add_trace(go.Scatter(x=peaks, y=highs[peaks], mode='markers', marker=dict(color='red', size=6), name='저항점'))
+            fig.add_trace(go.Scatter(x=troughs, y=lows[troughs], mode='markers', marker=dict(color='blue', size=6), name='지지점'))
+            fig.update_layout(yaxis_title="가격", xaxis_rangeslider_visible=False, height=600, margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig, use_container_width=True)
             
         with tab2:
-            st.subheader("실시간 패턴 분석 엔진 상태")
-            if found_patterns:
-                for pattern in found_patterns:
-                    st.success(f"🚨 **{pattern}** 패턴이 감지되었습니다!")
+            st.subheader("📊 과거 데이터 기반 매매 시뮬레이션 결과")
+            
+            if trade_log.empty:
+                st.info("설정된 기간 및 민감도 내에서 매매 조건(패턴 돌파 후 익청/손절)을 만족한 거래 내역이 없습니다.")
             else:
-                st.info("현재 식별된 명확한 패턴이 없습니다. 알고리즘이 지속적으로 백그라운드에서 연산 중입니다.")
+                # 성과 지표 계산
+                win_trades = trade_log[trade_log['수익률(%)'] > 0]
+                win_rate = (len(win_trades) / len(trade_log)) * 100
+                total_return = trade_log['수익률(%)'].sum()
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric(label="📈 총 누적 수익률", value=f"{total_return:.2f}%")
+                c2.metric(label="🎯 매매 승률", value=f"{win_rate:.1f}%")
+                c3.metric(label="💰 추정 최종 자산", value=f"${init_cash * (1 + total_return/100):,.2f}")
+                
+                st.markdown("---")
+                st.subheader("📝 상세 매매 일지 (AI 학습용 원천 데이터)")
+                st.dataframe(trade_log, use_container_width=True)
 
 except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}")
