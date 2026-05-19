@@ -21,7 +21,7 @@ with st.sidebar:
     with col1:
         period = st.selectbox("조회 기간", ["1mo", "3mo", "6mo", "1y"], index=1)
     with col2:
-        interval = st.selectbox("봉 단위", ["5m", "15m", "1h", "1d"], index=1) # 단타용 15분봉 기본 설정
+        interval = st.selectbox("봉 단위", ["5m", "15m", "1h", "1d"], index=1) 
     
     st.markdown("---")
     st.markdown("**🤖 알고리즘 민감도 설정**")
@@ -41,21 +41,18 @@ def get_data(ticker, period, interval):
     df.reset_index(inplace=True)
     return df
 
-# --- 4. 다중 패턴 인식 함수 (순차 탐색용으로 인덱스 범위 지정 가능하게 수정) ---
+# --- 4. 다중 패턴 인식 함수 ---
 def detect_patterns_at_idx(idx, highs, lows, peaks, troughs, tol_percent):
-    # 현재 인덱스(idx) 이전까지의 극점만 활용 (미래 데이터 참조 방지)
     avail_peaks = [p for p in peaks if p <= idx]
     avail_troughs = [t for t in troughs if t <= idx]
     
-    # 쌍바닥 탐지 (최근 2개)
     if len(avail_troughs) >= 2:
         t1, t2 = avail_troughs[-2], avail_troughs[-1]
-        if idx - t2 <= 5: # 최근 저점이 형성된 지 얼마 안 된 시점
+        if idx - t2 <= 5: 
             p_diff = abs(lows[t1] - lows[t2]) / lows[t1] * 100
             if p_diff <= (tol_percent * 2):
                 return "쌍바닥"
 
-    # 삼각수렴 및 채널 탐지 (최근 3개)
     if len(avail_peaks) >= 3 and len(avail_troughs) >= 3:
         p_x, p_y = avail_peaks[-3:], highs[avail_peaks[-3:]]
         t_x, t_y = avail_troughs[-3:], lows[avail_troughs[-3:]]
@@ -72,7 +69,6 @@ def detect_patterns_at_idx(idx, highs, lows, peaks, troughs, tol_percent):
         is_rising_bottom = norm_t_slope > tol_percent
         is_falling_top = norm_p_slope < -tol_percent
         
-        # 패턴 감지 순간 돌파 매수 타점 가정
         if is_flat_top and is_rising_bottom: return "어센딩 트라이앵글"
         elif is_falling_top and is_flat_bottom: return "디센딩 트라이앵글"
         elif is_falling_top and is_rising_bottom: return "대칭 삼각수렴"
@@ -86,16 +82,17 @@ def run_backtest(df, peaks, troughs, tol_percent, tp, sl):
     lows = df['Low'].values.flatten()
     closes = df['Close'].values.flatten()
     
+    # 🌟 에러 원인 해결: 자동으로 날짜/시간 컬럼 이름 찾기
+    time_col = df.columns[0] 
+    
     trades = []
     in_position = False
     entry_price = 0
     entry_idx = 0
     pattern_name = ""
     
-    # 데이터를 처음부터 끝까지 흐르며 시뮬레이션 (단타 관점)
     for i in range(20, len(df)):
         if not in_position:
-            # 포지션이 없을 때 패턴 탐지 체크
             pattern = detect_patterns_at_idx(i, highs, lows, peaks, troughs, tol_percent)
             if pattern:
                 in_position = True
@@ -103,23 +100,20 @@ def run_backtest(df, peaks, troughs, tol_percent, tp, sl):
                 entry_idx = i
                 pattern_name = pattern
         else:
-            # 포지션이 있을 때 익절/손절 감시
             current_close = closes[i]
             ret = (current_close - entry_price) / entry_price * 100
             
-            # 조건 A: 익절선 터치
+            # 🌟 에러 원인 해결: 찾은 time_col을 이용해 정확한 시간 기록
             if ret >= tp:
-                trades.append({'진입시간': df.iloc[entry_idx]['index'], '청산시간': df.iloc[i]['index'], 
+                trades.append({'진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], 
                                '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '익절'})
                 in_position = False
-            # 조건 B: 손절선 터치
             elif ret <= -sl:
-                trades.append({'진입시간': df.iloc[entry_idx]['index'], '청산시간': df.iloc[i]['index'], 
+                trades.append({'진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], 
                                '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '손절'})
                 in_position = False
-            # 조건 C: 단타 타임컷 (너무 오래 끌면 본전 부근 청산 - 캔들 15개 제한)
             elif (i - entry_idx) >= 15:
-                trades.append({'진입시간': df.iloc[entry_idx]['index'], '청산시간': df.iloc[i]['index'], 
+                trades.append({'진입시간': df.iloc[entry_idx][time_col], '청산시간': df.iloc[i][time_col], 
                                '패턴': pattern_name, '진입가': entry_price, '청산가': current_close, '수익률(%)': ret, '결과': '타임컷'})
                 in_position = False
                 
@@ -129,18 +123,19 @@ def run_backtest(df, peaks, troughs, tol_percent, tp, sl):
 try:
     df = get_data(ticker, period, interval)
     
-    if df.empty:
-        st.warning("데이터를 불러오지 못했습니다.")
+    # 데이터가 너무 짧아서 분석할 수 없는 경우 예외 처리
+    if df.empty or len(df) < 30:
+        st.warning("데이터를 불러오지 못했거나 분석하기에 캔들 개수가 너무 적습니다. 기간을 늘려주세요.")
     else:
+        time_col = df.columns[0] # 차트 x축용 시간 데이터 추출
+        
         highs = df['High'].values.flatten()
         lows = df['Low'].values.flatten()
         peaks, _ = find_peaks(highs, distance=distance)
         troughs, _ = find_peaks(-lows, distance=distance)
         
-        # 백테스팅 가동
         trade_log = run_backtest(df, peaks, troughs, tolerance, target_profit, stop_loss)
 
-        # 상단 전광판
         current_price = df['Close'].iloc[-1].item()
         prev_price = df['Close'].iloc[-2].item()
         m1, m2, m3, m4 = st.columns(4)
@@ -152,12 +147,16 @@ try:
         tab1, tab2 = st.tabs(["📊 실시간 차트 분석", "📝 모의투자 백테스팅 리포트"])
         
         with tab1:
-            fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'].values.flatten(),
+            # 🌟 에러 원인 해결: x축에 정확한 날짜 데이터(time_col) 삽입
+            fig = go.Figure(data=[go.Candlestick(x=df[time_col], open=df['Open'].values.flatten(),
                             high=highs, low=lows, close=df['Close'].values.flatten(),
                             increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="Candle")])
             
-            fig.add_trace(go.Scatter(x=peaks, y=highs[peaks], mode='markers', marker=dict(color='red', size=6), name='저항점'))
-            fig.add_trace(go.Scatter(x=troughs, y=lows[troughs], mode='markers', marker=dict(color='blue', size=6), name='지지점'))
+            fig.add_trace(go.Scatter(x=df[time_col].iloc[peaks], y=highs[peaks], mode='markers', marker=dict(color='red', size=6), name='저항점'))
+            fig.add_trace(go.Scatter(x=df[time_col].iloc[troughs], y=lows[troughs], mode='markers', marker=dict(color='blue', size=6), name='지지점'))
+            
+            # 주말/야간 빈 공간 숨기기 처리
+            fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])]) 
             fig.update_layout(yaxis_title="가격", xaxis_rangeslider_visible=False, height=600, margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig, use_container_width=True)
             
@@ -167,8 +166,7 @@ try:
             if trade_log.empty:
                 st.info("설정된 기간 및 민감도 내에서 매매 조건(패턴 돌파 후 익청/손절)을 만족한 거래 내역이 없습니다.")
             else:
-                # 성과 지표 계산
-                win_trades = trade_log[trade_log['수익률(%)'] > 0]
+                win_trades = trade_log[trade_log['결과'] == '익절']
                 win_rate = (len(win_trades) / len(trade_log)) * 100
                 total_return = trade_log['수익률(%)'].sum()
                 
@@ -179,7 +177,8 @@ try:
                 
                 st.markdown("---")
                 st.subheader("📝 상세 매매 일지 (AI 학습용 원천 데이터)")
-                st.dataframe(trade_log, use_container_width=True)
+                # 시간 데이터를 보기 좋게 포맷팅
+                st.dataframe(trade_log.style.format({'수익률(%)': '{:.2f}%', '진입가': '${:.2f}', '청산가': '${:.2f}'}), use_container_width=True)
 
 except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}")
