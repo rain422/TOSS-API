@@ -151,7 +151,7 @@ def run_backtest(df, peaks, troughs, tol_percent, tp, sl, time_col, bet, m_adds,
                 
     return pd.DataFrame(trades)
 
-# --- 6. 복구된 AI 최적화 알고리즘 엔진 ---
+# --- 6. AI 최적화 알고리즘 엔진 ---
 def optimize_strategy(df, peaks, troughs, time_col, bet, m_adds, drop_pct, use_rsi, r_max, use_vol, v_ratio):
     tp_range = [1.5, 3.0, 5.0] 
     sl_range = [2.0, 4.0, 6.0] 
@@ -193,17 +193,39 @@ try:
         m2.metric("분석된 캔들", f"{len(df)}개")
         m3.metric("필터링 후 매매 횟수", f"{len(trade_log)}회")
         
-        # 🌟 3번째 탭 복구!
         tab1, tab2, tab3 = st.tabs(["📊 실시간 차트 및 보조지표", "📝 수동 필터링 매매 리포트", "🤖 AI 자동 최적화"])
         
         with tab1:
-            fig = go.Figure(data=[go.Candlestick(x=df[time_col], open=df['Open'].values.flatten(), high=highs, low=lows, close=df['Close'].values.flatten(), increasing_line_color='#26a69a', decreasing_line_color='#ef5350')])
+            fig = go.Figure(data=[go.Candlestick(x=df[time_col], open=df['Open'].values.flatten(), high=highs, low=lows, close=df['Close'].values.flatten(), increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="Candle")])
             fig.add_trace(go.Scatter(x=df[time_col].iloc[peaks], y=highs[peaks], mode='markers', marker=dict(color='red', size=6), name='저항점'))
             fig.add_trace(go.Scatter(x=df[time_col].iloc[troughs], y=lows[troughs], mode='markers', marker=dict(color='blue', size=6), name='지지점'))
+            
+            # 🌟 [신규 추가] 가장 최근 형성된 실시간 추세선 렌더링 로직
+            if len(peaks) >= 3 and len(troughs) >= 3:
+                # 최근 3개 극점 추출
+                recent_peaks, recent_troughs = peaks[-3:], troughs[-3:]
+                p_x, p_y = recent_peaks, highs[recent_peaks]
+                t_x, t_y = recent_troughs, lows[recent_troughs]
+                
+                # 1차 방정식 피팅
+                p_slope, p_intercept = np.polyfit(p_x, p_y, 1)
+                t_slope, t_intercept = np.polyfit(t_x, t_y, 1)
+                
+                # 선을 그릴 x축 인덱스 범위 (가장 과거 극점 ~ 차트 끝)
+                start_idx = min(recent_peaks[0], recent_troughs[0])
+                end_idx = len(df) - 1
+                line_x_idx = np.array([start_idx, end_idx])
+                
+                # 실제 날짜 데이터로 변환 후 선 그리기
+                line_x_dates = df[time_col].iloc[line_x_idx]
+                fig.add_trace(go.Scatter(x=line_x_dates, y=p_slope * line_x_idx + p_intercept, mode='lines', line=dict(color='yellow', width=2, dash='dash'), name='현재 단기 저항선'))
+                fig.add_trace(go.Scatter(x=line_x_dates, y=t_slope * line_x_idx + t_intercept, mode='lines', line=dict(color='fuchsia', width=2, dash='dash'), name='현재 단기 지지선'))
+
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])]) 
             fig.update_layout(yaxis_title="가격", xaxis_rangeslider_visible=False, height=450, margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig, use_container_width=True)
             
+            # RSI 보조지표 차트
             fig_rsi = go.Figure()
             fig_rsi.add_trace(go.Scatter(x=df[time_col], y=df['RSI'], line=dict(color='purple', width=1.5), name='RSI(14)'))
             fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
@@ -219,11 +241,8 @@ try:
             else: 
                 st.info("조건에 맞는 매매 내역이 없습니다.")
                 
-        # 🌟 복구된 AI 최적화 영역
         with tab3:
             st.subheader("🚀 알고리즘 기반 황금 세팅 찾기")
-            st.write("현재 켜져 있는 보조지표 필터(RSI, 거래량)와 물타기 설정을 유지한 채, 가장 높은 수익금을 가져다줄 익절/손절/오차율 조합을 계산합니다.")
-            
             if st.button("🔥 필터 + 물타기 포함 자동 최적화 시작", use_container_width=True):
                 with st.spinner("수십 번의 시뮬레이션을 돌리며 최적값을 계산 중입니다..."):
                     best_params, best_ret, best_log = optimize_strategy(df, peaks, troughs, time_col, bet_size, max_adds, add_drop_pct, use_rsi_filter, rsi_max, use_vol_filter, vol_ratio)
