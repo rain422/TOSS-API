@@ -11,7 +11,7 @@ st.set_page_config(page_title="AI 트레이딩 대시보드", page_icon="📈", 
 st.markdown("<style>.block-container { padding-top: 2rem; padding-bottom: 2rem; }</style>", unsafe_allow_html=True)
 
 st.title("📈 AI 기반 퀀트 트레이딩 대시보드")
-st.markdown("다중 패턴 인식 + 보조지표 필터 + AI 파라미터 최적화 통합 시스템")
+st.markdown("다중 패턴 인식 + 보조지표 필터 + 실시간 차트 시각화 시스템")
 st.markdown("---")
 
 # --- 2. 사이드바 (컨트롤 패널) ---
@@ -23,6 +23,11 @@ with st.sidebar:
         period = st.selectbox("조회 기간", ["1mo", "3mo", "6mo", "1y"], index=1)
     with col2:
         interval = st.selectbox("봉 단위", ["5m", "15m", "1h", "1d"], index=1) 
+    
+    st.markdown("---")
+    st.markdown("**👀 차트 시각화 옵션**")
+    show_ma = st.checkbox("이동평균선 (20, 60) 표시", value=True)
+    show_bb = st.checkbox("볼린저 밴드 표시", value=False)
     
     st.markdown("---")
     st.markdown("**🤖 패턴 민감도 설정**")
@@ -37,7 +42,7 @@ with st.sidebar:
     vol_ratio = st.slider("평균 대비 최소 거래량 (%)", 100, 300, 150, step=10)
     
     st.markdown("---")
-    st.markdown("**💰 자본 및 매매 설정 (수동 테스트용)**")
+    st.markdown("**💰 매매 및 물타기 설정**")
     bet_size = st.number_input("1회 매수 금액 ($)", value=1000)
     target_profit = st.slider("최종 익절 목표 (%)", 0.5, 10.0, 2.0, 0.5)
     stop_loss = st.slider("최종 손절 제한 (%)", 0.5, 10.0, 4.0, 0.5)
@@ -52,6 +57,8 @@ def get_data_with_indicators(ticker, period, interval):
     df.reset_index(inplace=True)
     
     close_prices = df['Close'].values.flatten()
+    
+    # RSI 계산
     delta = np.diff(close_prices)
     seed = delta[:14]
     up = seed[seed >= 0].sum() / 14
@@ -68,8 +75,15 @@ def get_data_with_indicators(ticker, period, interval):
         rs = up / (down + 1e-10)
         rsi[i] = 100. - 100. / (1. + rs)
     df['RSI'] = rsi
-
     df['Vol_Avg5'] = df['Volume'].rolling(window=5).mean()
+    
+    # 🌟 시각화용 이동평균선(SMA) 및 볼린저 밴드 계산 추가
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['SMA_60'] = df['Close'].rolling(window=60).mean()
+    df['BB_std'] = df['Close'].rolling(window=20).std()
+    df['BB_upper'] = df['SMA_20'] + (df['BB_std'] * 2)
+    df['BB_lower'] = df['SMA_20'] - (df['BB_std'] * 2)
+    
     return df
 
 # --- 4. 패턴 인식 엔진 ---
@@ -156,24 +170,18 @@ def optimize_strategy(df, peaks, troughs, time_col, bet, m_adds, drop_pct, use_r
     tp_range = [1.5, 3.0, 5.0] 
     sl_range = [2.0, 4.0, 6.0] 
     tol_range = [0.2, 0.5, 0.8]     
-    
     best_return = -999
-    best_params = {}
-    best_log = pd.DataFrame()
+    best_params, best_log = {}, pd.DataFrame()
     
     combinations = list(itertools.product(tp_range, sl_range, tol_range))
-    
     for tp, sl, tol in combinations:
         log = run_backtest(df, peaks, troughs, tol, tp, sl, time_col, bet, m_adds, drop_pct, use_rsi, r_max, use_vol, v_ratio)
         if not log.empty:
             log['추정 수익금'] = log['투입금액'] * (log['수익률(%)'] / 100)
-            total_profit = log['추정 수익금'].sum()
-            
-            if total_profit > best_return:
-                best_return = total_profit
+            if log['추정 수익금'].sum() > best_return:
+                best_return = log['추정 수익금'].sum()
                 best_params = {'익절': tp, '손절': sl, '오차율': tol}
                 best_log = log
-                
     return best_params, best_return, best_log
 
 # --- 7. 메인 화면 렌더링 ---
@@ -188,49 +196,48 @@ try:
         
         trade_log = run_backtest(df, peaks, troughs, tolerance, target_profit, stop_loss, time_col, bet_size, max_adds, add_drop_pct, use_rsi_filter, rsi_max, use_vol_filter, vol_ratio)
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("현재가", f"${df['Close'].iloc[-1].item():.2f}")
-        m2.metric("분석된 캔들", f"{len(df)}개")
-        m3.metric("필터링 후 매매 횟수", f"{len(trade_log)}회")
-        
         tab1, tab2, tab3 = st.tabs(["📊 실시간 차트 및 보조지표", "📝 수동 필터링 매매 리포트", "🤖 AI 자동 최적화"])
         
         with tab1:
             fig = go.Figure(data=[go.Candlestick(x=df[time_col], open=df['Open'].values.flatten(), high=highs, low=lows, close=df['Close'].values.flatten(), increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="Candle")])
-            fig.add_trace(go.Scatter(x=df[time_col].iloc[peaks], y=highs[peaks], mode='markers', marker=dict(color='red', size=6), name='저항점'))
-            fig.add_trace(go.Scatter(x=df[time_col].iloc[troughs], y=lows[troughs], mode='markers', marker=dict(color='blue', size=6), name='지지점'))
             
-            # 🌟 [신규 추가] 가장 최근 형성된 실시간 추세선 렌더링 로직
+            # 🌟 [신규 추가] 이동평균선(SMA) 렌더링
+            if show_ma:
+                fig.add_trace(go.Scatter(x=df[time_col], y=df['SMA_20'].values.flatten(), mode='lines', line=dict(color='#FFA500', width=1.5), name='SMA 20 (단기)'))
+                fig.add_trace(go.Scatter(x=df[time_col], y=df['SMA_60'].values.flatten(), mode='lines', line=dict(color='#87CEFA', width=1.5), name='SMA 60 (중기)'))
+            
+            # 🌟 [신규 추가] 볼린저 밴드 렌더링
+            if show_bb:
+                fig.add_trace(go.Scatter(x=df[time_col], y=df['BB_upper'].values.flatten(), mode='lines', line=dict(color='rgba(173,216,230,0.5)', width=1, dash='dot'), name='BB 상단'))
+                fig.add_trace(go.Scatter(x=df[time_col], y=df['BB_lower'].values.flatten(), mode='lines', line=dict(color='rgba(173,216,230,0.5)', width=1, dash='dot'), fill='tonexty', fillcolor='rgba(173,216,230,0.1)', name='BB 하단'))
+            
+            # 극점 및 추세선 마커
+            fig.add_trace(go.Scatter(x=df[time_col].iloc[peaks], y=highs[peaks], mode='markers', marker=dict(color='red', size=5), name='저항점', opacity=0.5))
+            fig.add_trace(go.Scatter(x=df[time_col].iloc[troughs], y=lows[troughs], mode='markers', marker=dict(color='blue', size=5), name='지지점', opacity=0.5))
+            
             if len(peaks) >= 3 and len(troughs) >= 3:
-                # 최근 3개 극점 추출
                 recent_peaks, recent_troughs = peaks[-3:], troughs[-3:]
                 p_x, p_y = recent_peaks, highs[recent_peaks]
                 t_x, t_y = recent_troughs, lows[recent_troughs]
-                
-                # 1차 방정식 피팅
                 p_slope, p_intercept = np.polyfit(p_x, p_y, 1)
                 t_slope, t_intercept = np.polyfit(t_x, t_y, 1)
                 
-                # 선을 그릴 x축 인덱스 범위 (가장 과거 극점 ~ 차트 끝)
                 start_idx = min(recent_peaks[0], recent_troughs[0])
-                end_idx = len(df) - 1
-                line_x_idx = np.array([start_idx, end_idx])
-                
-                # 실제 날짜 데이터로 변환 후 선 그리기
+                line_x_idx = np.array([start_idx, len(df) - 1])
                 line_x_dates = df[time_col].iloc[line_x_idx]
-                fig.add_trace(go.Scatter(x=line_x_dates, y=p_slope * line_x_idx + p_intercept, mode='lines', line=dict(color='yellow', width=2, dash='dash'), name='현재 단기 저항선'))
-                fig.add_trace(go.Scatter(x=line_x_dates, y=t_slope * line_x_idx + t_intercept, mode='lines', line=dict(color='fuchsia', width=2, dash='dash'), name='현재 단기 지지선'))
+                
+                fig.add_trace(go.Scatter(x=line_x_dates, y=p_slope * line_x_idx + p_intercept, mode='lines', line=dict(color='yellow', width=2, dash='dash'), name='단기 저항선'))
+                fig.add_trace(go.Scatter(x=line_x_dates, y=t_slope * line_x_idx + t_intercept, mode='lines', line=dict(color='fuchsia', width=2, dash='dash'), name='단기 지지선'))
 
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])]) 
-            fig.update_layout(yaxis_title="가격", xaxis_rangeslider_visible=False, height=450, margin=dict(l=0, r=0, t=30, b=0))
+            fig.update_layout(yaxis_title="가격", xaxis_rangeslider_visible=False, height=550, margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig, use_container_width=True)
             
-            # RSI 보조지표 차트
             fig_rsi = go.Figure()
             fig_rsi.add_trace(go.Scatter(x=df[time_col], y=df['RSI'], line=dict(color='purple', width=1.5), name='RSI(14)'))
             fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
             fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
-            fig_rsi.update_layout(height=180, margin=dict(l=0, r=0, t=10, b=0), yaxis=dict(range=[10, 90]))
+            fig_rsi.update_layout(height=150, margin=dict(l=0, r=0, t=10, b=0), yaxis=dict(range=[10, 90]))
             st.plotly_chart(fig_rsi, use_container_width=True)
             
         with tab2:
@@ -238,8 +245,7 @@ try:
                 trade_log['추정 수익금'] = trade_log['투입금액'] * (trade_log['수익률(%)'] / 100)
                 st.metric("💵 총 누적 수익금", f"${trade_log['추정 수익금'].sum():,.2f}")
                 st.dataframe(trade_log.style.format({'수익률(%)': '{:.2f}%', '최종 평단가': '${:.2f}', '청산가': '${:.2f}', '투입금액': '${:,.2f}', '추정 수익금': '${:,.2f}'}), use_container_width=True)
-            else: 
-                st.info("조건에 맞는 매매 내역이 없습니다.")
+            else: st.info("조건에 맞는 매매 내역이 없습니다.")
                 
         with tab3:
             st.subheader("🚀 알고리즘 기반 황금 세팅 찾기")
@@ -251,14 +257,13 @@ try:
                     st.success("🎉 최적화 완료!")
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("🏆 최대 누적 수익금", f"${best_ret:,.2f}")
-                    c2.metric("최적 익절 라인", f"{best_params['익절']}%")
-                    c3.metric("최적 손절 라인", f"{best_params['손절']}%")
+                    c2.metric("최적 익절", f"{best_params['익절']}%")
+                    c3.metric("최적 손절", f"{best_params['손절']}%")
                     c4.metric("최적 오차율", f"{best_params['오차율']}%")
                     
                     best_log['추정 수익금'] = best_log['투입금액'] * (best_log['수익률(%)'] / 100)
                     st.dataframe(best_log.style.format({'수익률(%)': '{:.2f}%', '최종 평단가': '${:.2f}', '청산가': '${:.2f}', '투입금액': '${:,.2f}', '추정 수익금': '${:,.2f}'}), use_container_width=True)
-                else:
-                    st.warning("수익이 나는 타점을 찾지 못했습니다.")
+                else: st.warning("수익이 나는 타점을 찾지 못했습니다.")
 
 except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}")
