@@ -9,7 +9,7 @@ st.set_page_config(page_title="AI 트레이딩 대시보드", page_icon="📈", 
 st.markdown("<style>.block-container { padding-top: 2rem; padding-bottom: 2rem; }</style>", unsafe_allow_html=True)
 
 st.title("📈 AI 기반 퀀트 트레이딩 대시보드")
-st.markdown("단기 추세 분석 및 패턴 인식 모니터링 시스템")
+st.markdown("다중 패턴 인식 및 단기 추세 모니터링 시스템")
 st.markdown("---")
 
 # --- 2. 사이드바 (컨트롤 패널) ---
@@ -25,8 +25,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**🤖 알고리즘 민감도 설정**")
     distance = st.slider("최소 캔들 간격", min_value=3, max_value=20, value=5)
-    # 패턴 인식을 위한 허용 오차 (기울기가 0에 얼마나 가까워야 수평으로 인정할지)
-    tolerance = st.slider("저항선 수평 허용 오차(%)", min_value=0.0, max_value=2.0, value=0.5, step=0.1)
+    tolerance = st.slider("수평/대칭 허용 오차(%)", min_value=0.0, max_value=2.0, value=0.5, step=0.1)
 
 # --- 3. 데이터 수집 함수 ---
 @st.cache_data
@@ -35,36 +34,56 @@ def get_data(ticker, period, interval):
     df.reset_index(inplace=True)
     return df
 
-# --- 4. 패턴 인식 엔진 (수학적 알고리즘) ---
-def detect_ascending_triangle(peaks, troughs, highs, lows, tol_percent):
-    # 최근 3개의 고점과 저점만 대상으로 분석 (최근 추세 확인)
-    if len(peaks) < 3 or len(troughs) < 3:
-        return False, None, None
+# --- 4. 🌟 다중 패턴 인식 엔진 ---
+def detect_patterns(peaks, troughs, highs, lows, tol_percent):
+    detected_patterns = []
+    res_line = None
+    sup_line = None
     
-    recent_peaks = peaks[-3:]
-    recent_troughs = troughs[-3:]
-    
-    # x값(인덱스)과 y값(가격) 
-    peak_x, peak_y = recent_peaks, highs[recent_peaks]
-    trough_x, trough_y = recent_troughs, lows[recent_troughs]
-    
-    # 1차 방정식(y = mx + c) 피팅하여 기울기(m)와 절편(c) 구하기
-    peak_slope, peak_intercept = np.polyfit(peak_x, peak_y, 1)
-    trough_slope, trough_intercept = np.polyfit(trough_x, trough_y, 1)
-    
-    # 기울기를 가격 비율로 정규화 (종목마다 가격이 다르므로 %로 변환)
-    avg_price = np.mean(highs)
-    norm_peak_slope = (peak_slope / avg_price) * 100
-    norm_trough_slope = (trough_slope / avg_price) * 100
-    
-    # 조건 1: 고점 저항선은 수평에 가까운가? (허용 오차 이내)
-    is_flat_top = abs(norm_peak_slope) <= tol_percent
-    # 조건 2: 저점 지지선은 명확히 상승하고 있는가?
-    is_rising_bottom = norm_trough_slope > (tol_percent * 0.5) 
-    
-    if is_flat_top and is_rising_bottom:
-        return True, (peak_slope, peak_intercept, recent_peaks), (trough_slope, trough_intercept, recent_troughs)
-    return False, None, None
+    # [A] 쌍바닥 (Double Bottom) 탐지 로직 (최근 2개 저점 비교)
+    if len(troughs) >= 2:
+        t1_price, t2_price = lows[troughs[-2]], lows[troughs[-1]]
+        price_diff_percent = abs(t1_price - t2_price) / t1_price * 100
+        
+        # 두 저점의 가격 차이가 오차 범위(기본 오차의 2배 정도 허용) 내에 있다면
+        if price_diff_percent <= (tol_percent * 2):
+            detected_patterns.append("쌍바닥 (Double Bottom)")
+
+    # [B] 삼각 수렴 및 박스권 탐지 로직 (최근 3개 극점 활용)
+    if len(peaks) >= 3 and len(troughs) >= 3:
+        recent_peaks, recent_troughs = peaks[-3:], troughs[-3:]
+        peak_x, peak_y = recent_peaks, highs[recent_peaks]
+        trough_x, trough_y = recent_troughs, lows[recent_troughs]
+        
+        # 선형 회귀로 기울기(m)와 절편(c) 계산
+        peak_slope, peak_intercept = np.polyfit(peak_x, peak_y, 1)
+        trough_slope, trough_intercept = np.polyfit(trough_x, trough_y, 1)
+        
+        # 기울기 정규화 (%)
+        avg_price = np.mean(highs)
+        norm_peak_slope = (peak_slope / avg_price) * 100
+        norm_trough_slope = (trough_slope / avg_price) * 100
+        
+        # 상태 정의
+        is_flat_top = abs(norm_peak_slope) <= tol_percent
+        is_flat_bottom = abs(norm_trough_slope) <= tol_percent
+        is_rising_bottom = norm_trough_slope > tol_percent
+        is_falling_top = norm_peak_slope < -tol_percent
+        
+        res_line = (peak_slope, peak_intercept, recent_peaks)
+        sup_line = (trough_slope, trough_intercept, recent_troughs)
+
+        # 패턴 판별
+        if is_flat_top and is_rising_bottom:
+            detected_patterns.append("어센딩 트라이앵글")
+        elif is_falling_top and is_flat_bottom:
+            detected_patterns.append("디센딩 트라이앵글")
+        elif is_falling_top and is_rising_bottom:
+            detected_patterns.append("대칭 삼각수렴 (Symmetrical Triangle)")
+        elif is_flat_top and is_flat_bottom:
+            detected_patterns.append("박스권 / 횡보 채널")
+
+    return detected_patterns, res_line, sup_line
 
 # --- 5. 메인 화면 레이아웃 및 렌더링 ---
 try:
@@ -73,14 +92,13 @@ try:
     if df.empty:
         st.warning("데이터를 불러오지 못했습니다.")
     else:
-        # 데이터 및 극점 추출
         highs = df['High'].values.flatten()
         lows = df['Low'].values.flatten()
         peaks, _ = find_peaks(highs, distance=distance)
         troughs, _ = find_peaks(-lows, distance=distance)
         
-        # 🌟 패턴 인식 엔진 가동
-        is_triangle, res_line, sup_line = detect_ascending_triangle(peaks, troughs, highs, lows, tolerance)
+        # 🌟 다중 패턴 엔진 가동
+        found_patterns, res_line, sup_line = detect_patterns(peaks, troughs, highs, lows, tolerance)
 
         # UI 출력
         current_price = df['Close'].iloc[-1].item()
@@ -90,7 +108,7 @@ try:
         m2.metric(label="기간 내 최고가", value=f"${df['High'].max().item():.2f}")
         m3.metric(label="거래량", value=f"{df['Volume'].iloc[-1].item():,}")
         
-        tab1, tab2, tab3 = st.tabs(["📊 차트 & 극점 분석", "🤖 패턴 탐지 리포트", "📝 모의투자 (예정)"])
+        tab1, tab2 = st.tabs(["📊 차트 & 극점 분석", "🤖 패턴 탐지 리포트"])
         
         with tab1:
             fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'].values.flatten(),
@@ -102,18 +120,16 @@ try:
             fig.add_trace(go.Scatter(x=troughs, y=lows[troughs], mode='markers',
                 marker=dict(color='rgba(0, 150, 255, 0.7)', size=8, symbol='triangle-up'), name='지지점'))
 
-            # 🌟 패턴이 발견되면 차트 위에 추세선(Trendline) 그리기
-            if is_triangle:
+            # 차트 위에 추세선 그리기 (극점이 3개 이상일 때만)
+            if res_line and sup_line:
                 p_slope, p_int, p_x = res_line
                 t_slope, t_int, t_x = sup_line
-                
-                # 선을 그릴 시작점과 끝점 설정 (최근 패턴 발생 구간)
                 line_x = np.array([min(p_x[0], t_x[0]), df.index[-1]])
                 
                 fig.add_trace(go.Scatter(x=line_x, y=p_slope * line_x + p_int, 
-                                         mode='lines', line=dict(color='yellow', width=2, dash='dash'), name='저항선 (수평)'))
+                                         mode='lines', line=dict(color='yellow', width=2, dash='dash'), name='단기 저항선'))
                 fig.add_trace(go.Scatter(x=line_x, y=t_slope * line_x + t_int, 
-                                         mode='lines', line=dict(color='fuchsia', width=2, dash='dash'), name='지지선 (상승)'))
+                                         mode='lines', line=dict(color='fuchsia', width=2, dash='dash'), name='단기 지지선'))
 
             fig.update_layout(yaxis_title="가격", xaxis_rangeslider_visible=False, height=600,
                               margin=dict(l=0, r=0, t=30, b=0), hovermode="x unified")
@@ -121,13 +137,11 @@ try:
             
         with tab2:
             st.subheader("실시간 패턴 분석 엔진 상태")
-            if is_triangle:
-                st.success("🚨 **어센딩 트라이앵글(Ascending Triangle) 패턴이 감지되었습니다!**")
-                st.write("- 상단 저항선이 수평을 유지하며, 하단 지지선이 상승하며 수렴 중입니다.")
-                st.write("- **매매 전략:** 저항선 돌파 시 강한 상승 동력이 발생할 수 있으므로 돌파 매수 타점을 주시하세요.")
+            if found_patterns:
+                for pattern in found_patterns:
+                    st.success(f"🚨 **{pattern}** 패턴이 감지되었습니다!")
             else:
-                st.info("현재 식별된 명확한 어센딩 트라이앵글 패턴이 없습니다.")
-                st.write("알고리즘이 지속적으로 백그라운드에서 추세선을 연산 중입니다.")
+                st.info("현재 식별된 명확한 패턴이 없습니다. 알고리즘이 지속적으로 백그라운드에서 연산 중입니다.")
 
 except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}")
